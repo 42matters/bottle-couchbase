@@ -58,6 +58,6 @@ The following configuration options exist for the plugin class:
 * **max_clients** : Maximum number of connections to create.
 If more connections are needed, the callback will be blocked until some other callbacks
 release their connections (default: ``100``)
-* **host**: Host on which the Redis server is located (default: ``localhost``)
+* **host**: Host on which the Couchbase server is located (default: ``localhost``), can also be a list of hosts
 * **bucket** : Select the database to use (default: ``default``)
 * Other arguments [couchbase.Couchbase.connect](http://www.couchbase.com/autodocs/couchbase-python-client-1.2.0/html/api/couchbase.html#couchbase.Couchbase.connect) takes

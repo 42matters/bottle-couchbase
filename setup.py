@@ -9,7 +9,7 @@ except ImportError:
 
 setup(
     name='bottle-couchbase',
-    version='0.1.0',
+    version='0.1.1',
     url='https://github.com/42matters/bottle-couchbase',
     description='Couchbase integration for Bottle.',
     author='Bo Wang',

@@ -21,6 +21,13 @@ class _Pool(object):
         :param connargs: Extra arguments to pass to the Connection object's
         constructor
         """
+
+        if initial <= 0:
+            initial = 1
+
+        if max_clients <= initial:
+            max_clients = initial + 1
+
         self._q = Queue()
         self._l = []
         self._connargs = connargs
@@ -34,7 +41,6 @@ class _Pool(object):
 
     def _make_client(self):
         ret = Connection(**self._connargs)
-        ret.pool_index = self._cur_clients
         self._l.append(ret)
         return ret
 

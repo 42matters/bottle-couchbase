@@ -1,3 +1,4 @@
+import hashlib
 import inspect
 from bottle import PluginError
 from couchbase.connection import Connection
@@ -83,10 +84,10 @@ class _Pool(object):
 
 
 class CouchbasePlugin(object):
-    name = 'couchbase'
     api = 2
 
     def __init__(self, keyword='cb', host='localhost', bucket='default', **kwargs):
+        self.name = '/'.join(['couchbase', keyword, str(host), bucket])
         self.keyword = keyword
         self.host = host
         self.bucket = bucket
@@ -105,10 +106,8 @@ class CouchbasePlugin(object):
                                **self.kwargs)
 
     def apply(self, callback, route):
-        conf = route.config.get('couchbase') or {}
         args = inspect.getargspec(route.callback)[0]
-        keyword = conf.get('keyword', self.keyword)
-        if keyword not in args:
+        if self.keyword not in args:
             return callback
 
         def wrapper(*args, **kwargs):

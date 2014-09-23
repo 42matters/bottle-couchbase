@@ -1,9 +1,11 @@
-import hashlib
 import inspect
-from bottle import PluginError
-from couchbase.connection import Connection
 from Queue import Queue, Empty
 from threading import Lock
+import time
+
+from bottle import PluginError
+from couchbase.connection import Connection
+from couchbase.exceptions import NetworkError, TimeoutError, CouchbaseError
 
 
 class _ClientUnavailableError(Exception):
@@ -11,7 +13,7 @@ class _ClientUnavailableError(Exception):
 
 
 class _Pool(object):
-    def __init__(self, initial=4, max_clients=100, **connargs):
+    def __init__(self, initial=4, max_clients=100, tolerate_error=False, timeout_retries=2, **connargs):
         """
         Create a new pool
         :param int initial: The initial number of client objects to create
@@ -30,22 +32,41 @@ class _Pool(object):
             max_clients = initial + 1
 
         self._q = Queue()
-        self._l = []
         self._connargs = connargs
-        self._cur_clients = 0
+        self._clients_in_use = 0
         self._max_clients = max_clients
+        self._tolerate_error = tolerate_error
+        self._timeout_retries = max(0, timeout_retries)
         self._lock = Lock()
 
-        for x in range(initial):
-            self._q.put(self._make_client())
-            self._cur_clients += 1
+        try:
+            for x in range(initial):
+                self._q.put(self._make_client())
+        except NetworkError:
+            if not tolerate_error:
+                raise
 
     def _make_client(self):
-        ret = Connection(**self._connargs)
-        self._l.append(ret)
-        return ret
+        for i in range(1 + self._timeout_retries):
+            try:
+                return Connection(**self._connargs)
+            except TimeoutError:
+                if i >= self._timeout_retries:
+                    raise
+                time.sleep(1)
 
-    def get_client(self, initial_timeout=0.05, next_timeout=200):
+    def _test_client(self, cb):
+        try:
+            cb.get('\u0fff', quiet=True)
+            self._clients_in_use += 1
+            return cb
+        except CouchbaseError:
+            if self._tolerate_error:
+                return None
+            else:
+                raise
+
+    def get_client(self, initial_timeout=0.1, next_timeout=30):
         """
         Wait until a client instance is available
         :param float initial_timeout:
@@ -58,20 +79,21 @@ class _Pool(object):
         :return: A connection object
         """
         try:
-            return self._q.get(True, initial_timeout)
+            return self._test_client(self._q.get(True, initial_timeout))
         except Empty:
             try:
                 self._lock.acquire()
-                if self._cur_clients == self._max_clients:
+                if self._clients_in_use >= self._max_clients:
                     raise _ClientUnavailableError("Too many clients in use")
-                cb = self._make_client()
-                self._cur_clients += 1
-                return cb
-            except _ClientUnavailableError as ex:
+                return self._test_client(self._make_client())
+            except NetworkError:
+                if not self._tolerate_error:
+                    raise
+            except _ClientUnavailableError as e:
                 try:
-                    return self._q.get(True, next_timeout)
+                    return self._test_client(self._q.get(True, next_timeout))
                 except Empty:
-                    raise ex
+                    raise e
             finally:
                 self._lock.release()
 
@@ -80,18 +102,29 @@ class _Pool(object):
         Return a Connection object to the pool
         :param Connection cb: the client to release
         """
-        self._q.put(cb, True)
+        if cb:
+            self._q.put(cb, True)
+            self._clients_in_use -= 1
 
 
 class CouchbasePlugin(object):
     api = 2
 
-    def __init__(self, keyword='cb', host='localhost', bucket='default', **kwargs):
+    def __init__(self,
+                 keyword='cb',
+                 host='localhost',
+                 bucket='default',
+                 tolerate_error=False,
+                 timeout_retries=2,
+                 pooling=True, **kwargs):
         self.name = '/'.join(['couchbase', keyword, str(host), bucket])
         self.keyword = keyword
         self.host = host
         self.bucket = bucket
         self.kwargs = kwargs
+        self.tolerate_error = tolerate_error
+        self.timeout_retries = timeout_retries
+        self.pooling = pooling
         self._pool = None
 
     def setup(self, app):
@@ -100,9 +133,11 @@ class CouchbasePlugin(object):
                 continue
             if other.keyword == self.keyword:
                 raise PluginError("Found another couchbase plugin with conflicting settings (non-unique keyword).")
-        if self._pool is None:
+        if self.pooling and self._pool is None:
             self._pool = _Pool(bucket=self.bucket,
                                host=self.host,
+                               timeout_retries=self.timeout_retries,
+                               tolerate_error=self.tolerate_error,
                                **self.kwargs)
 
     def apply(self, callback, route):
@@ -111,13 +146,30 @@ class CouchbasePlugin(object):
             return callback
 
         def wrapper(*args, **kwargs):
-            cb = self._pool.get_client()
+            cb = None
+            if self._pool:
+                cb = self._pool.get_client()
+            else:
+                for _ in range(1 + self.timeout_retries):
+                    try:
+                        cb = Connection(bucket=self.bucket, host=self.host, **self.kwargs)
+                        break
+                    except TimeoutError:
+                        time.sleep(1)
+                    except NetworkError:
+                        if self.tolerate_error:
+                            break
+                        else:
+                            raise
             kwargs[self.keyword] = cb
             try:
                 rv = callback(*args, **kwargs)
             finally:
-                self._pool.release_client(cb)
+                if self._pool and cb:
+                    self._pool.release_client(cb)
             return rv
+
         return wrapper
+
 
 Plugin = CouchbasePlugin
